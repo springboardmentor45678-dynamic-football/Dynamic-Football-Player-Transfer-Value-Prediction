@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Player Value AI Predictor</title>
+
+    <!-- Embedded CSS -->
+    <style>
+        :root {
+            /* Brand Colors */
+            --primary: #6366f1;
+            --primary-dark: #4f46e5;
+            --secondary: #8b5cf6;
+            --accent: #ec4899;
+
+            /* Backgrounds */
+            --bg-main: #0f172a;
+            --bg-card: #1e293b;
+            --bg-input: #334155;
+            --bg-gradient: linear-gradient(135deg, #0f172a 0%, #1a1f3a 100%);
+
+            /* Text */
+            --text-primary: #f1f5f9;
+            --text-secondary: #cbd5e1;
+            --text-muted: #94a3b8;
+
+            /* Utility */
+            --border: #475569;
+            --success: #10b981;
+            --btn-gradient: linear-gradient(135deg, #6366f1, #8b5cf6);
+            --progress-gradient: linear-gradient(90deg, #6366f1, #8b5cf6, #ec4899);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-main);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow-x: hidden;
+        }
+
+        .background-gradient {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: var(--bg-gradient);
+            z-index: -1;
+        }
+
+        .container {
+            width: 90%;
+            max-width: 800px;
+            padding: 40px 0;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+
+        .text-accent {
+            color: var(--accent);
+        }
+
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+        }
+
+        .prediction-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            padding: 40px;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(10px);
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 25px;
+            margin-bottom: 35px;
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        label {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+
+        input {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 12px 16px;
+            color: white;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.2);
+        }
+
+        .btn-primary {
+            width: 100%;
+            padding: 16px;
+            border: none;
+            border-radius: 12px;
+            background: var(--btn-gradient);
+            color: white;
+            font-size: 1.1rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            box-shadow: 0 10px 20px rgba(99, 102, 241, 0.3);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 15px 30px rgba(99, 102, 241, 0.5);
+        }
+
+        .result-container {
+            margin-top: 30px;
+            text-align: center;
+            animation: fadeIn 0.5s ease-out;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .divider {
+            height: 1px;
+            background: var(--border);
+            margin: 20px 0 30px;
+        }
+
+        .value-display {
+            font-size: 3rem;
+            font-weight: 800;
+            color: var(--success);
+            margin: 15px 0;
+            text-shadow: 0 0 20px rgba(16, 185, 129, 0.3);
+        }
+
+        .progress-bar-container {
+            width: 100%;
+            height: 8px;
+            background: var(--bg-input);
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 20px;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 100%;
+            background: var(--progress-gradient);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.7; }
+            50% { opacity: 1; }
+            100% { opacity: 0.7; }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="background-gradient"></div>
+
+    <div class="container">
+        <header>
+            <h1>Player Value <span class="text-accent">Predictor</span></h1>
+            <p class="subtitle">Enter player statistics to calculate market value using AI</p>
+        </header>
+
+        <main class="prediction-card">
+            <form id="predictionForm">
+                <div class="form-grid">
+                    <div class="input-group">
+                        <label for="age">Age</label>
+                        <input type="number" id="age" step="0.1" placeholder="e.g. 24" required>
+                    </div>
+                    <div class="input-group">
+                        <label for="height">Height (cm)</label>
+                        <input type="number" id="height" step="0.1" placeholder="e.g. 185" required>
+                    </div>
+                    <div class="input-group">
+                        <label for="goals_x">Goals</label>
+                        <input type="number" id="goals_x" step="1" placeholder="0" required>
+                    </div>
+                    <div class="input-group">
+                        <label for="assists">Assists</label>
+                        <input type="number" id="assists" step="1" placeholder="0" required>
+                    </div>
+                    <div class="input-group">
+                        <label for="minutes_played">Minutes Played</label>
+                        <input type="number" id="minutes_played" step="1" placeholder="0" required>
+                    </div>
+                    <div class="input-group">
+                        <label for="days_missed">Days Missed (Injury)</label>
+                        <input type="number" id="days_missed" step="1" placeholder="0" required>
+                    </div>
+                </div>
+
+                <button type="submit" class="btn-primary">Calculate Value</button>
+            </form>
+
+            <div id="resultContainer" class="result-container hidden">
+                <div class="divider"></div>
+                <h3>Predicted Market Value</h3>
+                <div class="value-display">
+                    <span id="predictedValue">--</span>
+                </div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar"></div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        document.getElementById('predictionForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = e.target.querySelector('button');
+            const resultDiv = document.getElementById('resultContainer');
+
+            btn.innerText = "Processing...";
+            btn.disabled = true;
+
+            const data = {
+                age: parseFloat(document.getElementById('age').value),
+                height: parseFloat(document.getElementById('height').value),
+                goals_x: parseFloat(document.getElementById('goals_x').value),
+                assists: parseFloat(document.getElementById('assists').value),
+                minutes_played: parseFloat(document.getElementById('minutes_played').value),
+                days_missed: parseFloat(document.getElementById('days_missed').value)
+            };
+
+            try {
+                const response = await fetch('http://127.0.0.1:8000/predict', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+
+                const result = await response.json();
+                resultDiv.classList.remove('hidden');
+                document.getElementById('predictedValue').innerText =
+                    "€" + result.predicted_value.toLocaleString();
+
+                resultDiv.scrollIntoView({ behavior: 'smooth' });
+            } catch (error) {
+                alert("Error connecting to the server. Make sure FastAPI is running!");
+            } finally {
+                btn.innerText = "Calculate Value";
+                btn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
