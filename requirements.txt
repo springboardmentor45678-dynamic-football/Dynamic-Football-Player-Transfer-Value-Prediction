@@ -1,0 +1,33 @@
+# --- Core Python Data Stack ---
+pandas
+numpy
+scipy
+
+# --- Data Visualization ---
+matplotlib
+seaborn
+plotly
+
+
+
+# --- Feature Engineering / EDA Tools ---
+statsmodels
+pandas-profiling
+feature-engine
+
+
+# --- Model Saving / Serialization ---
+joblib
+pickle5
+
+# --- API & Requests ---
+requests
+python-dotenv
+
+# --- Notebook & IDE Integration ---
+jupyter
+notebook
+ipykernel
+
+# --- Logging & Monitoring ---
+loguru
