@@ -1,139 +1,55 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+import pandas as pd
 import joblib
-import numpy as np
+import os
+from fastapi.middleware.cors import CORSMiddleware
 
-# -------------------------------------------------
-# Load trained model
-# -------------------------------------------------
-model = joblib.load("dt.pkl")
+app = FastAPI(title="TransferIQ API")
 
-# -------------------------------------------------
-# Feature order (CRITICAL)
-# -------------------------------------------------
-FEATURES = [
-    "total_assists",
-    "total_nb_in_group",
-    "total_matches",
-    "total_subed_in",
-    "total_penalty_goals",
-    "total_goals",
-    "career_total_injuries",
-    "total_yellow_cards",
-    "total_nb_on_pitch",
-    "total_minutes_played",
-    "height",
-    "total_subed_out",
-    "total_own_goals",
-    "total_second_yellow_cards",
-    "total_direct_red_cards",
-    "main_position_encoded_midfield"
-]
+# Allow CORS for frontend (adjust origins as needed)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# -------------------------------------------------
-# Feature scaling params (hard-coded)
-# -------------------------------------------------
-MEAN = {
-    "total_assists": 23.347878,
-    "total_nb_in_group": 320.060681,
-    "total_matches": 24.144641,
-    "total_subed_in": 49.541427,
-    "total_penalty_goals": 2.828382,
-    "total_goals": 39.106686,
-    "career_total_injuries": 4.931014,
-    "total_yellow_cards": 34.002082,
-    "total_nb_on_pitch": 268.586098,
-    "total_minutes_played": 7865.713424,
-    "height": 184.620068,
-    "total_subed_out": 59.720806,
-    "total_own_goals": 0.540886,
-    "total_second_yellow_cards": 0.859453,
-    "total_direct_red_cards": 0.894848
-}
+# Load Decision Tree model
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "../model/decision_tree_regressor_model.pkl")
 
-STD = {
-    "total_assists": 32.092319,
-    "total_nb_in_group": 216.067471,
-    "total_matches": 36.231985,
-    "total_subed_in": 45.503593,
-    "total_penalty_goals": 7.418137,
-    "total_goals": 60.167491,
-    "career_total_injuries": 5.541989,
-    "total_yellow_cards": 31.799643,
-    "total_nb_on_pitch": 192.149683,
-    "total_minutes_played": 9017.090235,
-    "height": 53.775656,
-    "total_subed_out": 59.735423,
-    "total_own_goals": 1.137524,
-    "total_second_yellow_cards": 1.381741,
-    "total_direct_red_cards": 1.427938
-}
+if not os.path.exists(MODEL_PATH):
+    raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
 
-# -------------------------------------------------
-# Target scaling params
-# -------------------------------------------------
-TARGET_STD  = 193542928.53
-TARGET_MEAN = 9621216.77
+model = joblib.load(MODEL_PATH)
 
+# Load feature names
+X_val = pd.read_csv(os.path.join(os.path.dirname(__file__), "../data/X_val_new.csv"))
+FEATURES = X_val.columns.tolist()
 
-BINARY_FEATURES = {"main_position_encoded_midfield"}
+@app.get("/")
+def home():
+    return {"message": "TransferIQ API (Decision Tree) is running successfully"}
 
-# -------------------------------------------------
-# FastAPI app
-# -------------------------------------------------
-app = FastAPI(title="Market Value Prediction API (Scaled Target)")
-
-# -------------------------------------------------
-# Input schema
-# -------------------------------------------------
-class PlayerInput(BaseModel):
-    total_assists: float
-    total_nb_in_group: float
-    total_matches: float
-    total_subed_in: float
-    total_penalty_goals: float
-    total_goals: float
-    career_total_injuries: float
-    total_yellow_cards: float
-    total_nb_on_pitch: float
-    total_minutes_played: float
-    height: float
-    total_subed_out: float
-    total_own_goals: float
-    total_second_yellow_cards: float
-    total_direct_red_cards: float
-    main_position_encoded_midfield: int  # 0 or 1
-
-# -------------------------------------------------
-# Scaling logic
-# -------------------------------------------------
-def scale_input(data: PlayerInput):
-    scaled = []
-    for feature in FEATURES:
-        value = getattr(data, feature)
-
-        if feature in BINARY_FEATURES:
-            scaled.append(value)
-        else:
-            scaled.append((value - MEAN[feature]) / STD[feature])
-
-    return np.array([scaled])
-
-# -------------------------------------------------
-# Prediction endpoint
-# -------------------------------------------------
 @app.post("/predict")
-def predict(data: PlayerInput):
-    X_scaled = scale_input(data)
+def predict(data: dict):
+    try:
+        input_df = pd.DataFrame([data])
 
-    # Model outputs scaled target
-    y_scaled = model.predict(X_scaled)[0]
-    print("scaled input: ", X_scaled)
-    print("scaled value: ", y_scaled)
+        # Fill missing features with 0 for model compatibility
+        for col in FEATURES:
+            if col not in input_df.columns:
+                input_df[col] = 0
 
-    # Inverse transform → ORIGINAL market value
-    y_original = y_scaled * TARGET_STD + TARGET_MEAN
+        # Ensure correct column order
+        input_df = input_df[FEATURES]
 
-    return {
-        "predicted_market_value": float(y_original)
-    }
+        # Convert all columns to numeric if possible (for one-hot and numeric features)
+        input_df = input_df.apply(pd.to_numeric, errors='ignore')
+
+        prediction = model.predict(input_df)[0]
+
+        return {"predicted_transfer_value": round(float(prediction), 2)}
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
