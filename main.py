@@ -1,139 +1,68 @@
+# main.py (FastAPI Backend)
 from fastapi import FastAPI
 from pydantic import BaseModel
-import joblib
+import pandas as pd
 import numpy as np
+import lightgbm as lgb
 
-# -------------------------------------------------
-# Load trained model
-# -------------------------------------------------
-model = joblib.load("dt.pkl")
+app = FastAPI()
 
-# -------------------------------------------------
-# Feature order (CRITICAL)
-# -------------------------------------------------
-FEATURES = [
-    "total_assists",
-    "total_nb_in_group",
-    "total_matches",
-    "total_subed_in",
-    "total_penalty_goals",
-    "total_goals",
-    "career_total_injuries",
-    "total_yellow_cards",
-    "total_nb_on_pitch",
-    "total_minutes_played",
-    "height",
-    "total_subed_out",
-    "total_own_goals",
-    "total_second_yellow_cards",
-    "total_direct_red_cards",
-    "main_position_encoded_midfield"
-]
+# Load the trained LightGBM model
+model = lgb.Booster(model_file='lightgbm_model.txt')
 
-# -------------------------------------------------
-# Feature scaling params (hard-coded)
-# -------------------------------------------------
-MEAN = {
-    "total_assists": 23.347878,
-    "total_nb_in_group": 320.060681,
-    "total_matches": 24.144641,
-    "total_subed_in": 49.541427,
-    "total_penalty_goals": 2.828382,
-    "total_goals": 39.106686,
-    "career_total_injuries": 4.931014,
-    "total_yellow_cards": 34.002082,
-    "total_nb_on_pitch": 268.586098,
-    "total_minutes_played": 7865.713424,
-    "height": 184.620068,
-    "total_subed_out": 59.720806,
-    "total_own_goals": 0.540886,
-    "total_second_yellow_cards": 0.859453,
-    "total_direct_red_cards": 0.894848
-}
+class PlayerData(BaseModel):
+    age: float
+    most_recent_transfer_fee: float
+    total_career_goals: float
+    total_career_assists: float
+    days_since_joined: float
+    total_transfers: float
+    vader_polarity: float
+    tb_polarity: float
+    num_unique_teammates: float
+    total_career_minutes_played: float
+    total_value_at_transfer: float
+    remaining_contract_duration: float
+    days_since_last_transfer: float
+    total_career_matches: float
+    total_transfer_fees: float
+    citizenship_freq_encoded: float
+    club_prestige: float
 
-STD = {
-    "total_assists": 32.092319,
-    "total_nb_in_group": 216.067471,
-    "total_matches": 36.231985,
-    "total_subed_in": 45.503593,
-    "total_penalty_goals": 7.418137,
-    "total_goals": 60.167491,
-    "career_total_injuries": 5.541989,
-    "total_yellow_cards": 31.799643,
-    "total_nb_on_pitch": 192.149683,
-    "total_minutes_played": 9017.090235,
-    "height": 53.775656,
-    "total_subed_out": 59.735423,
-    "total_own_goals": 1.137524,
-    "total_second_yellow_cards": 1.381741,
-    "total_direct_red_cards": 1.427938
-}
-
-# -------------------------------------------------
-# Target scaling params
-# -------------------------------------------------
-TARGET_STD  = 193542928.53
-TARGET_MEAN = 9621216.77
-
-
-BINARY_FEATURES = {"main_position_encoded_midfield"}
-
-# -------------------------------------------------
-# FastAPI app
-# -------------------------------------------------
-app = FastAPI(title="Market Value Prediction API (Scaled Target)")
-
-# -------------------------------------------------
-# Input schema
-# -------------------------------------------------
-class PlayerInput(BaseModel):
-    total_assists: float
-    total_nb_in_group: float
-    total_matches: float
-    total_subed_in: float
-    total_penalty_goals: float
-    total_goals: float
-    career_total_injuries: float
-    total_yellow_cards: float
-    total_nb_on_pitch: float
-    total_minutes_played: float
-    height: float
-    total_subed_out: float
-    total_own_goals: float
-    total_second_yellow_cards: float
-    total_direct_red_cards: float
-    main_position_encoded_midfield: int  # 0 or 1
-
-# -------------------------------------------------
-# Scaling logic
-# -------------------------------------------------
-def scale_input(data: PlayerInput):
-    scaled = []
-    for feature in FEATURES:
-        value = getattr(data, feature)
-
-        if feature in BINARY_FEATURES:
-            scaled.append(value)
-        else:
-            scaled.append((value - MEAN[feature]) / STD[feature])
-
-    return np.array([scaled])
-
-# -------------------------------------------------
-# Prediction endpoint
-# -------------------------------------------------
 @app.post("/predict")
-def predict(data: PlayerInput):
-    X_scaled = scale_input(data)
+def predict_market_value(data: PlayerData):
+    # Convert input to DataFrame
+    df = pd.DataFrame([data.dict()])
 
-    # Model outputs scaled target
-    y_scaled = model.predict(X_scaled)[0]
-    print("scaled input: ", X_scaled)
-    print("scaled value: ", y_scaled)
+    # --- REPLICATE FEATURE ENGINEERING FROM NOTEBOOK ---
+    # Performance Age Ratio
+    df['performance_age_ratio'] = (df['total_career_goals'] + df['total_career_assists']) / (df['age'] - 15).clip(lower=1)
+    
+    # Loyalty Index
+    df['loyalty_index'] = df['days_since_joined'] / (df['total_transfers'] + 1)
+    
+    # Market Visibility
+    df['market_visibility'] = (df['vader_polarity'] + df['tb_polarity']) * df['num_unique_teammates']
+    
+    # Career Momentum
+    df['career_momentum'] = df['most_recent_transfer_fee'] / (df['age'] - 17).clip(lower=1)
+    
+    # Efficiency Index
+    df['efficiency_index'] = (df['total_career_goals'] + df['total_career_assists']) / (df['total_career_minutes_played'] + 1)
 
-    # Inverse transform → ORIGINAL market value
-    y_original = y_scaled * TARGET_STD + TARGET_MEAN
+    # Select the Gold Features used for training
+    gold_features = [
+        'club_prestige', 'total_value_at_transfer', 'most_recent_transfer_fee',
+        'career_momentum', 'remaining_contract_duration', 'days_since_last_transfer',
+        'total_career_matches', 'performance_age_ratio', 'total_career_minutes_played',
+        'total_transfer_fees', 'market_visibility', 'loyalty_index',
+        'citizenship_freq_encoded', 'efficiency_index'
+    ]
+    
+    X_input = df[gold_features]
 
-    return {
-        "predicted_market_value": float(y_original)
-    }
+    # Predict (Inverse log transform as used in notebook)
+    log_prediction = model.predict(X_input)
+    real_prediction = np.expm1(log_prediction)[0]
+
+    return {"predicted_value": float(real_prediction)}
