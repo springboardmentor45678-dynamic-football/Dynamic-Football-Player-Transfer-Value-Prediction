@@ -88,7 +88,7 @@ The project is deployed as a full-stack machine learning application with a clea
 * End-to-end machine learning system implementation
 * Strong emphasis on data quality, preprocessing, and feature engineering
 * Hands-on experience with ensemble learning techniques
-* Production-oriented deployment using FastAPI and Streamlit
+* Production oriented deployment using FastAPI and Streamlit
 * Modular and scalable system design
 
 
@@ -97,4 +97,5 @@ The project is deployed as a full-stack machine learning application with a clea
 * Football clubs and scouting teams
 * Sports analytics and performance evaluation
 * AI-driven decision support systems in sports management
+
 
