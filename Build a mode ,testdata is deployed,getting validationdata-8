@@ -1,0 +1,464 @@
+{"nbformat":4,"nbformat_minor":0,"metadata":{"colab":{"provenance":[],"authorship_tag":"ABX9TyMM6ZxeL1zE1d29xuOxqDN7"},"kernelspec":{"name":"python3","display_name":"Python 3"},"language_info":{"name":"python"}},"cells":[{"cell_type":"code","source":["# ==================================================\n","# 0. INSTALL CATBOOST (if not already installed)\n","# ==================================================\n","try:\n","    from catboost import CatBoostClassifier\n","except ModuleNotFoundError:\n","    !pip install catboost\n","    from catboost import CatBoostClassifier\n","\n","# ==================================================\n","# 1. IMPORTS\n","# ==================================================\n","import pandas as pd\n","import numpy as np\n","import zipfile, os\n","from google.colab import files\n","\n","from sklearn.model_selection import train_test_split, GridSearchCV\n","from sklearn.preprocessing import StandardScaler\n","from sklearn.pipeline import Pipeline\n","from sklearn.impute import SimpleImputer\n","from sklearn.linear_model import LassoCV\n","from sklearn.ensemble import RandomForestClassifier\n","from sklearn.metrics import accuracy_score, classification_report\n","\n","import warnings\n","warnings.filterwarnings(\"ignore\")\n","\n","# ==================================================\n","# 2. FILE UPLOAD\n","# ==================================================\n","print(\"📂 Upload ZIP or Excel file\")\n","uploaded = files.upload()\n","\n","file_name = list(uploaded.keys())[0]\n","base_dir = \"/content/data\"\n","os.makedirs(base_dir, exist_ok=True)\n","\n","file_path = os.path.join(base_dir, file_name)\n","with open(file_path, \"wb\") as f:\n","    f.write(uploaded[file_name])\n","\n","# ==================================================\n","# 3. EXTRACT ZIP (IF ANY)\n","# ==================================================\n","excel_files = []\n","\n","if file_name.endswith(\".zip\"):\n","    with zipfile.ZipFile(file_path, \"r\") as z:\n","        z.extractall(base_dir)\n","    for root, _, files_ in os.walk(base_dir):\n","        for f in files_:\n","            if f.endswith((\".xlsx\", \".xls\")):\n","                excel_files.append(os.path.join(root, f))\n","else:\n","    excel_files.append(file_path)\n","\n","print(\"\\nAvailable Excel files:\")\n","for i, f in enumerate(excel_files):\n","    print(f\"{i}: {os.path.basename(f)}\")\n","\n","# ==================================================\n","# 4. USER SELECT FILE\n","# ==================================================\n","idx = int(input(\"\\nEnter file number to use: \"))\n","df = pd.read_excel(excel_files[idx])\n","\n","print(\"\\nColumns in selected file:\")\n","print(df.columns.tolist())\n","\n","# ==================================================\n","# 5. TARGET CHECK\n","# ==================================================\n","if \"days_missed\" not in df.columns:\n","    raise ValueError(\n","        \"❌ 'days_missed' column not found.\\n\"\n","        \"👉 Please select the INJURY dataset file\"\n","    )\n","\n","# ==================================================\n","# 6. TARGET CREATION\n","# ==================================================\n","def categorize_days(v):\n","    if v <= 5:\n","        return 0\n","    elif v <= 15:\n","        return 1\n","    else:\n","        return 2\n","\n","y = df[\"days_missed\"].apply(categorize_days)\n","X = df.drop(columns=[\"days_missed\", \"player_id\"], errors=\"ignore\")\n","\n","# ==================================================\n","# 7. FEATURE ENGINEERING\n","# ==================================================\n","for c in X.columns:\n","    if \"date\" in c.lower():\n","        X[c] = pd.to_datetime(X[c], errors=\"coerce\")\n","        X[c] = (X[c] - X[c].min()).dt.days\n","\n","X = pd.get_dummies(X, drop_first=True)\n","\n","# ==================================================\n","# 8. TRAIN / VALIDATION / TEST SPLIT\n","# ==================================================\n","X_temp, X_test, y_temp, y_test = train_test_split(\n","    X, y, test_size=0.20, random_state=42, stratify=y\n",")\n","\n","X_train, X_val, y_train, y_val = train_test_split(\n","    X_temp, y_temp, test_size=0.25, random_state=42, stratify=y_temp\n",")\n","\n","print(\"\\nDataset sizes:\")\n","print(\"Train:\", X_train.shape)\n","print(\"Validation:\", X_val.shape)\n","print(\"Test (Deployment):\", X_test.shape)\n","\n","# ==================================================\n","# 9. PREPROCESSING\n","# ==================================================\n","prep = Pipeline([\n","    (\"imputer\", SimpleImputer(strategy=\"median\")),\n","    (\"scaler\", StandardScaler())\n","])\n","\n","X_train = pd.DataFrame(prep.fit_transform(X_train), columns=X.columns)\n","X_val   = pd.DataFrame(prep.transform(X_val), columns=X.columns)\n","X_test  = pd.DataFrame(prep.transform(X_test), columns=X.columns)\n","\n","# ==================================================\n","# 10. FEATURE SELECTION (TRAIN ONLY)\n","# ==================================================\n","rf = RandomForestClassifier(n_estimators=300, random_state=42)\n","rf.fit(X_train, y_train)\n","\n","rf_imp = pd.Series(rf.feature_importances_, index=X.columns)\n","rf_features = rf_imp[rf_imp > 0.01].index.tolist()\n","if not rf_features:\n","    rf_features = rf_imp.sort_values(ascending=False).head(5).index.tolist()\n","\n","X_train = X_train[rf_features]\n","X_val   = X_val[rf_features]\n","X_test  = X_test[rf_features]\n","\n","lasso = LassoCV(cv=5, max_iter=5000)\n","lasso.fit(X_train, y_train)\n","\n","lasso_features = X_train.columns[np.abs(lasso.coef_) > 0].tolist()\n","if not lasso_features:\n","    lasso_features = X_train.columns.tolist()\n","\n","X_train = X_train[lasso_features]\n","X_val   = X_val[lasso_features]\n","X_test  = X_test[lasso_features]\n","\n","print(\"\\nFinal selected features:\", len(lasso_features))\n","\n","# ==================================================\n","# 11. HYPERPARAMETER TUNING (CATBOOST)\n","# ==================================================\n","cat = CatBoostClassifier(verbose=0)\n","\n","param_grid = {\n","    \"depth\": [6, 8, 10],\n","    \"learning_rate\": [0.03, 0.05, 0.1],\n","    \"iterations\": [300, 500]\n","}\n","\n","grid = GridSearchCV(\n","    cat,\n","    param_grid,\n","    cv=3,\n","    scoring=\"accuracy\",\n","    n_jobs=-1\n",")\n","\n","grid.fit(X_train, y_train)\n","best_model = grid.best_estimator_\n","\n","print(\"\\nBest CatBoost Params:\", grid.best_params_)\n","\n","# ==================================================\n","# 12. VALIDATION PERFORMANCE\n","# ==================================================\n","val_preds = best_model.predict(X_val)\n","val_acc = accuracy_score(y_val, val_preds)\n","print(\"Validation Accuracy:\", round(val_acc * 100, 2), \"%\")\n","\n","# ==================================================\n","# 13. FINAL TEST (DEPLOYMENT DATA)\n","# ==================================================\n","test_preds = best_model.predict(X_test)\n","test_acc = accuracy_score(y_test, test_preds)\n","\n","print(\"\\n==============================\")\n","print(\"FINAL TEST ACCURACY:\", round(test_acc * 100, 2), \"%\")\n","print(\"==============================\")\n","print(classification_report(\n","    y_test, test_preds,\n","    target_names=[\"Short-term\", \"Medium-term\", \"Long-term\"]\n","))\n","\n","# ==================================================\n","# 14. SAVE DATASETS\n","# ==================================================\n","X_train.assign(target=y_train).to_csv(\"/content/train_dataset.csv\", index=False)\n","X_val.assign(target=y_val).to_csv(\"/content/validation_dataset.csv\", index=False)\n","X_test.assign(target=y_test).to_csv(\"/content/test_dataset.csv\", index=False)\n","\n","print(\"\\n✅ Train, Validation, and Test datasets saved\")\n"],"metadata":{"colab":{"base_uri":"https://localhost:8080/","height":750},"id":"Wgmf57LBG_ZA","executionInfo":{"status":"ok","timestamp":1765905669622,"user_tz":-330,"elapsed":1186369,"user":{"displayName":"Tejaramasai Matta","userId":"15848208966579053818"}},"outputId":"8dba441b-7638-443b-e47a-3825ff7961d5"},"execution_count":4,"outputs":[{"output_type":"stream","name":"stdout","text":["📂 Upload ZIP or Excel file\n"]},{"output_type":"display_data","data":{"text/plain":["<IPython.core.display.HTML object>"],"text/html":["\n","     <input type=\"file\" id=\"files-6f2fa177-69ff-40ec-bb20-3cd86dd06de7\" name=\"files[]\" multiple disabled\n","        style=\"border:none\" />\n","     <output id=\"result-6f2fa177-69ff-40ec-bb20-3cd86dd06de7\">\n","      Upload widget is only available when the cell has been executed in the\n","      current browser session. Please rerun this cell to enable.\n","      </output>\n","      <script>// Copyright 2017 Google LLC\n","//\n","// Licensed under the Apache License, Version 2.0 (the \"License\");\n","// you may not use this file except in compliance with the License.\n","// You may obtain a copy of the License at\n","//\n","//      http://www.apache.org/licenses/LICENSE-2.0\n","//\n","// Unless required by applicable law or agreed to in writing, software\n","// distributed under the License is distributed on an \"AS IS\" BASIS,\n","// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n","// See the License for the specific language governing permissions and\n","// limitations under the License.\n","\n","/**\n"," * @fileoverview Helpers for google.colab Python module.\n"," */\n","(function(scope) {\n","function span(text, styleAttributes = {}) {\n","  const element = document.createElement('span');\n","  element.textContent = text;\n","  for (const key of Object.keys(styleAttributes)) {\n","    element.style[key] = styleAttributes[key];\n","  }\n","  return element;\n","}\n","\n","// Max number of bytes which will be uploaded at a time.\n","const MAX_PAYLOAD_SIZE = 100 * 1024;\n","\n","function _uploadFiles(inputId, outputId) {\n","  const steps = uploadFilesStep(inputId, outputId);\n","  const outputElement = document.getElementById(outputId);\n","  // Cache steps on the outputElement to make it available for the next call\n","  // to uploadFilesContinue from Python.\n","  outputElement.steps = steps;\n","\n","  return _uploadFilesContinue(outputId);\n","}\n","\n","// This is roughly an async generator (not supported in the browser yet),\n","// where there are multiple asynchronous steps and the Python side is going\n","// to poll for completion of each step.\n","// This uses a Promise to block the python side on completion of each step,\n","// then passes the result of the previous step as the input to the next step.\n","function _uploadFilesContinue(outputId) {\n","  const outputElement = document.getElementById(outputId);\n","  const steps = outputElement.steps;\n","\n","  const next = steps.next(outputElement.lastPromiseValue);\n","  return Promise.resolve(next.value.promise).then((value) => {\n","    // Cache the last promise value to make it available to the next\n","    // step of the generator.\n","    outputElement.lastPromiseValue = value;\n","    return next.value.response;\n","  });\n","}\n","\n","/**\n"," * Generator function which is called between each async step of the upload\n"," * process.\n"," * @param {string} inputId Element ID of the input file picker element.\n"," * @param {string} outputId Element ID of the output display.\n"," * @return {!Iterable<!Object>} Iterable of next steps.\n"," */\n","function* uploadFilesStep(inputId, outputId) {\n","  const inputElement = document.getElementById(inputId);\n","  inputElement.disabled = false;\n","\n","  const outputElement = document.getElementById(outputId);\n","  outputElement.innerHTML = '';\n","\n","  const pickedPromise = new Promise((resolve) => {\n","    inputElement.addEventListener('change', (e) => {\n","      resolve(e.target.files);\n","    });\n","  });\n","\n","  const cancel = document.createElement('button');\n","  inputElement.parentElement.appendChild(cancel);\n","  cancel.textContent = 'Cancel upload';\n","  const cancelPromise = new Promise((resolve) => {\n","    cancel.onclick = () => {\n","      resolve(null);\n","    };\n","  });\n","\n","  // Wait for the user to pick the files.\n","  const files = yield {\n","    promise: Promise.race([pickedPromise, cancelPromise]),\n","    response: {\n","      action: 'starting',\n","    }\n","  };\n","\n","  cancel.remove();\n","\n","  // Disable the input element since further picks are not allowed.\n","  inputElement.disabled = true;\n","\n","  if (!files) {\n","    return {\n","      response: {\n","        action: 'complete',\n","      }\n","    };\n","  }\n","\n","  for (const file of files) {\n","    const li = document.createElement('li');\n","    li.append(span(file.name, {fontWeight: 'bold'}));\n","    li.append(span(\n","        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +\n","        `last modified: ${\n","            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :\n","                                    'n/a'} - `));\n","    const percent = span('0% done');\n","    li.appendChild(percent);\n","\n","    outputElement.appendChild(li);\n","\n","    const fileDataPromise = new Promise((resolve) => {\n","      const reader = new FileReader();\n","      reader.onload = (e) => {\n","        resolve(e.target.result);\n","      };\n","      reader.readAsArrayBuffer(file);\n","    });\n","    // Wait for the data to be ready.\n","    let fileData = yield {\n","      promise: fileDataPromise,\n","      response: {\n","        action: 'continue',\n","      }\n","    };\n","\n","    // Use a chunked sending to avoid message size limits. See b/62115660.\n","    let position = 0;\n","    do {\n","      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);\n","      const chunk = new Uint8Array(fileData, position, length);\n","      position += length;\n","\n","      const base64 = btoa(String.fromCharCode.apply(null, chunk));\n","      yield {\n","        response: {\n","          action: 'append',\n","          file: file.name,\n","          data: base64,\n","        },\n","      };\n","\n","      let percentDone = fileData.byteLength === 0 ?\n","          100 :\n","          Math.round((position / fileData.byteLength) * 100);\n","      percent.textContent = `${percentDone}% done`;\n","\n","    } while (position < fileData.byteLength);\n","  }\n","\n","  // All done.\n","  yield {\n","    response: {\n","      action: 'complete',\n","    }\n","  };\n","}\n","\n","scope.google = scope.google || {};\n","scope.google.colab = scope.google.colab || {};\n","scope.google.colab._files = {\n","  _uploadFiles,\n","  _uploadFilesContinue,\n","};\n","})(self);\n","</script> "]},"metadata":{}},{"output_type":"stream","name":"stdout","text":["Saving U=8 Reduced dataset&imimportant features,randomforest,lasso-OP.zip to U=8 Reduced dataset&imimportant features,randomforest,lasso-OP (2).zip\n","\n","Available Excel files:\n","0: cleaned_player_profiles (2) (1) (1) (1) (2) (3) (1) (1).xlsx\n","1: cleaned_tweets_premier_league_footballers_final (2) (1) (2) (3) (1) (1).xlsx\n","2: player_injuries_cleaned_final (2) (1) (1) (2) (3) (1) (1).xlsx\n","3: cleaned_player_market_value (1) (1) (2) (1) (2) (5) (1) (1).xlsx\n","4: player_performances_cleaned_partial (1) (1) (1) (2) (3) (1) (1).xlsx\n","\n","Enter file number to use: 2\n","\n","Columns in selected file:\n","['player_id', 'season_name', 'injury_reason', 'from_date', 'end_date', 'days_missed', 'games_missed']\n","\n","Dataset sizes:\n","Train: (71370, 394)\n","Validation: (23790, 394)\n","Test (Deployment): (23790, 394)\n","\n","Final selected features: 4\n","\n","Best CatBoost Params: {'depth': 8, 'iterations': 500, 'learning_rate': 0.1}\n","Validation Accuracy: 76.22 %\n","\n","==============================\n","FINAL TEST ACCURACY: 76.48 %\n","==============================\n","              precision    recall  f1-score   support\n","\n","  Short-term       0.65      0.27      0.38      2716\n"," Medium-term       0.63      0.79      0.70      8020\n","   Long-term       0.89      0.86      0.87     13054\n","\n","    accuracy                           0.76     23790\n","   macro avg       0.72      0.64      0.65     23790\n","weighted avg       0.77      0.76      0.76     23790\n","\n","\n","✅ Train, Validation, and Test datasets saved\n"]}]},{"cell_type":"code","source":["# ==================================================\n","# 0. INSTALL CATBOOST (SAFE)\n","# ==================================================\n","try:\n","    from catboost import CatBoostClassifier\n","except ModuleNotFoundError:\n","    !pip install -q catboost\n","    from catboost import CatBoostClassifier\n","\n","# ==================================================\n","# 1. IMPORTS\n","# ==================================================\n","import pandas as pd\n","import numpy as np\n","import zipfile, os\n","from google.colab import files\n","\n","from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold\n","from sklearn.preprocessing import StandardScaler\n","from sklearn.pipeline import Pipeline\n","from sklearn.impute import SimpleImputer\n","from sklearn.linear_model import LassoCV\n","from sklearn.ensemble import RandomForestClassifier\n","from sklearn.metrics import accuracy_score, classification_report\n","\n","import warnings\n","warnings.filterwarnings(\"ignore\")\n","\n","# ==================================================\n","# 2. FILE UPLOAD\n","# ==================================================\n","print(\" Upload ZIP or Excel file\")\n","uploaded = files.upload()\n","\n","file_name = list(uploaded.keys())[0]\n","base_dir = \"/content/data\"\n","os.makedirs(base_dir, exist_ok=True)\n","\n","file_path = os.path.join(base_dir, file_name)\n","with open(file_path, \"wb\") as f:\n","    f.write(uploaded[file_name])\n","\n","# ==================================================\n","# 3. FAST ZIP EXTRACTION + FILE SCAN\n","# ==================================================\n","excel_files = []\n","\n","if file_name.endswith(\".zip\"):\n","    with zipfile.ZipFile(file_path, \"r\") as z:\n","        z.extractall(base_dir)\n","\n","    # FAST scan (1-level only)\n","    for item in os.listdir(base_dir):\n","        p = os.path.join(base_dir, item)\n","        if item.lower().endswith((\".xlsx\", \".xls\")):\n","            excel_files.append(p)\n","        elif os.path.isdir(p):\n","            for f in os.listdir(p):\n","                if f.lower().endswith((\".xlsx\", \".xls\")):\n","                    excel_files.append(os.path.join(p, f))\n","else:\n","    excel_files.append(file_path)\n","\n","if not excel_files:\n","    raise ValueError(\" No Excel files found\")\n","\n","# Auto-pick injury dataset if possible\n","injury_files = [f for f in excel_files if \"injur\" in f.lower()]\n","selected_file = injury_files[0] if injury_files else excel_files[0]\n","\n","print(\" Using file:\", os.path.basename(selected_file))\n","df = pd.read_excel(selected_file)\n","\n","# ==================================================\n","# 4. TARGET CHECK\n","# ==================================================\n","if \"days_missed\" not in df.columns:\n","    raise ValueError(\" 'days_missed' column not found (select injury dataset)\")\n","\n","# ==================================================\n","# 5. TARGET CREATION\n","# ==================================================\n","def categorize_days(v):\n","    if v <= 5:\n","        return 0\n","    elif v <= 15:\n","        return 1\n","    else:\n","        return 2\n","\n","y = df[\"days_missed\"].apply(categorize_days)\n","X = df.drop(columns=[\"days_missed\", \"player_id\"], errors=\"ignore\")\n","\n","# ==================================================\n","# 6. FEATURE ENGINEERING\n","# ==================================================\n","for c in X.columns:\n","    if \"date\" in c.lower():\n","        X[c] = pd.to_datetime(X[c], errors=\"coerce\")\n","        X[c] = (X[c] - X[c].min()).dt.days\n","\n","X = pd.get_dummies(X, drop_first=True)\n","\n","# ==================================================\n","# 7. TRAIN / VALIDATION / TEST SPLIT\n","# ==================================================\n","X_temp, X_test, y_temp, y_test = train_test_split(\n","    X, y, test_size=0.20, stratify=y, random_state=42\n",")\n","\n","X_train, X_val, y_train, y_val = train_test_split(\n","    X_temp, y_temp, test_size=0.25, stratify=y_temp, random_state=42\n",")\n","\n","print(\"Train:\", X_train.shape, \"Validation:\", X_val.shape, \"Test:\", X_test.shape)\n","\n","# ==================================================\n","# 8. PREPROCESSING\n","# ==================================================\n","prep = Pipeline([\n","    (\"imputer\", SimpleImputer(strategy=\"median\")),\n","    (\"scaler\", StandardScaler())\n","])\n","\n","X_train = pd.DataFrame(prep.fit_transform(X_train), columns=X.columns)\n","X_val   = pd.DataFrame(prep.transform(X_val), columns=X.columns)\n","X_test  = pd.DataFrame(prep.transform(X_test), columns=X.columns)\n","\n","# ==================================================\n","# 9. FEATURE SELECTION (TRAIN ONLY)\n","# ==================================================\n","rf = RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1)\n","rf.fit(X_train, y_train)\n","\n","rf_imp = pd.Series(rf.feature_importances_, index=X.columns)\n","rf_features = rf_imp[rf_imp > 0.01].index.tolist()\n","if not rf_features:\n","    rf_features = rf_imp.sort_values(ascending=False).head(5).index.tolist()\n","\n","X_train = X_train[rf_features]\n","X_val   = X_val[rf_features]\n","X_test  = X_test[rf_features]\n","\n","lasso = LassoCV(cv=5, max_iter=5000)\n","lasso.fit(X_train, y_train)\n","\n","lasso_features = X_train.columns[np.abs(lasso.coef_) > 0].tolist()\n","if not lasso_features:\n","    lasso_features = X_train.columns.tolist()\n","\n","X_train = X_train[lasso_features]\n","X_val   = X_val[lasso_features]\n","X_test  = X_test[lasso_features]\n","\n","print(\"Final selected features:\", len(lasso_features))\n","\n","# ==================================================\n","# 10. HYPERPARAMETER TUNING (GRID + CV)\n","# ==================================================\n","cat = CatBoostClassifier(\n","    loss_function=\"MultiClass\",\n","    verbose=0,\n","    bootstrap_type=\"Bernoulli\"\n",")\n","\n","param_grid = {\n","    \"depth\": [6, 8],\n","    \"learning_rate\": [0.03, 0.05],\n","    \"iterations\": [300, 500],\n","    \"subsample\": [0.7, 0.9]\n","}\n","\n","cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)\n","\n","grid = GridSearchCV(\n","    cat,\n","    param_grid,\n","    cv=cv,\n","    scoring=\"accuracy\",\n","    n_jobs=-1\n",")\n","\n","grid.fit(X_train, y_train)\n","best_model = grid.best_estimator_\n","\n","print(\"Best Params:\", grid.best_params_)\n","\n","# ==================================================\n","# 11. VALIDATION PERFORMANCE\n","# ==================================================\n","val_preds = best_model.predict(X_val)\n","print(\"Validation Accuracy:\", round(accuracy_score(y_val, val_preds)*100, 2), \"%\")\n","\n","# ==================================================\n","# 12. FINAL TEST (DEPLOYMENT DATA)\n","# ==================================================\n","test_preds = best_model.predict(X_test)\n","print(\"\\nFINAL TEST ACCURACY:\", round(accuracy_score(y_test, test_preds)*100, 2), \"%\")\n","print(classification_report(y_test, test_preds,\n","      target_names=[\"Short-term\", \"Medium-term\", \"Long-term\"]))\n","\n","# ==================================================\n","# 13. SAVE DATASETS\n","# ==================================================\n","X_train.assign(target=y_train).to_csv(\"/content/train_dataset.csv\", index=False)\n","X_val.assign(target=y_val).to_csv(\"/content/validation_dataset.csv\", index=False)\n","X_test.assign(target=y_test).to_csv(\"/content/test_dataset.csv\", index=False)\n","\n","print(\" Train / Validation / Test datasets saved\")\n"],"metadata":{"colab":{"base_uri":"https://localhost:8080/","height":403},"id":"x01To0qhYVPZ","executionInfo":{"status":"ok","timestamp":1765910379055,"user_tz":-330,"elapsed":1314722,"user":{"displayName":"Tejaramasai Matta","userId":"15848208966579053818"}},"outputId":"1206be11-e743-4c2c-d816-40b49a8e24bd"},"execution_count":7,"outputs":[{"output_type":"stream","name":"stdout","text":[" Upload ZIP or Excel file\n"]},{"output_type":"display_data","data":{"text/plain":["<IPython.core.display.HTML object>"],"text/html":["\n","     <input type=\"file\" id=\"files-7087dd21-15ed-4482-870f-8995b93d4ae4\" name=\"files[]\" multiple disabled\n","        style=\"border:none\" />\n","     <output id=\"result-7087dd21-15ed-4482-870f-8995b93d4ae4\">\n","      Upload widget is only available when the cell has been executed in the\n","      current browser session. Please rerun this cell to enable.\n","      </output>\n","      <script>// Copyright 2017 Google LLC\n","//\n","// Licensed under the Apache License, Version 2.0 (the \"License\");\n","// you may not use this file except in compliance with the License.\n","// You may obtain a copy of the License at\n","//\n","//      http://www.apache.org/licenses/LICENSE-2.0\n","//\n","// Unless required by applicable law or agreed to in writing, software\n","// distributed under the License is distributed on an \"AS IS\" BASIS,\n","// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n","// See the License for the specific language governing permissions and\n","// limitations under the License.\n","\n","/**\n"," * @fileoverview Helpers for google.colab Python module.\n"," */\n","(function(scope) {\n","function span(text, styleAttributes = {}) {\n","  const element = document.createElement('span');\n","  element.textContent = text;\n","  for (const key of Object.keys(styleAttributes)) {\n","    element.style[key] = styleAttributes[key];\n","  }\n","  return element;\n","}\n","\n","// Max number of bytes which will be uploaded at a time.\n","const MAX_PAYLOAD_SIZE = 100 * 1024;\n","\n","function _uploadFiles(inputId, outputId) {\n","  const steps = uploadFilesStep(inputId, outputId);\n","  const outputElement = document.getElementById(outputId);\n","  // Cache steps on the outputElement to make it available for the next call\n","  // to uploadFilesContinue from Python.\n","  outputElement.steps = steps;\n","\n","  return _uploadFilesContinue(outputId);\n","}\n","\n","// This is roughly an async generator (not supported in the browser yet),\n","// where there are multiple asynchronous steps and the Python side is going\n","// to poll for completion of each step.\n","// This uses a Promise to block the python side on completion of each step,\n","// then passes the result of the previous step as the input to the next step.\n","function _uploadFilesContinue(outputId) {\n","  const outputElement = document.getElementById(outputId);\n","  const steps = outputElement.steps;\n","\n","  const next = steps.next(outputElement.lastPromiseValue);\n","  return Promise.resolve(next.value.promise).then((value) => {\n","    // Cache the last promise value to make it available to the next\n","    // step of the generator.\n","    outputElement.lastPromiseValue = value;\n","    return next.value.response;\n","  });\n","}\n","\n","/**\n"," * Generator function which is called between each async step of the upload\n"," * process.\n"," * @param {string} inputId Element ID of the input file picker element.\n"," * @param {string} outputId Element ID of the output display.\n"," * @return {!Iterable<!Object>} Iterable of next steps.\n"," */\n","function* uploadFilesStep(inputId, outputId) {\n","  const inputElement = document.getElementById(inputId);\n","  inputElement.disabled = false;\n","\n","  const outputElement = document.getElementById(outputId);\n","  outputElement.innerHTML = '';\n","\n","  const pickedPromise = new Promise((resolve) => {\n","    inputElement.addEventListener('change', (e) => {\n","      resolve(e.target.files);\n","    });\n","  });\n","\n","  const cancel = document.createElement('button');\n","  inputElement.parentElement.appendChild(cancel);\n","  cancel.textContent = 'Cancel upload';\n","  const cancelPromise = new Promise((resolve) => {\n","    cancel.onclick = () => {\n","      resolve(null);\n","    };\n","  });\n","\n","  // Wait for the user to pick the files.\n","  const files = yield {\n","    promise: Promise.race([pickedPromise, cancelPromise]),\n","    response: {\n","      action: 'starting',\n","    }\n","  };\n","\n","  cancel.remove();\n","\n","  // Disable the input element since further picks are not allowed.\n","  inputElement.disabled = true;\n","\n","  if (!files) {\n","    return {\n","      response: {\n","        action: 'complete',\n","      }\n","    };\n","  }\n","\n","  for (const file of files) {\n","    const li = document.createElement('li');\n","    li.append(span(file.name, {fontWeight: 'bold'}));\n","    li.append(span(\n","        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +\n","        `last modified: ${\n","            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :\n","                                    'n/a'} - `));\n","    const percent = span('0% done');\n","    li.appendChild(percent);\n","\n","    outputElement.appendChild(li);\n","\n","    const fileDataPromise = new Promise((resolve) => {\n","      const reader = new FileReader();\n","      reader.onload = (e) => {\n","        resolve(e.target.result);\n","      };\n","      reader.readAsArrayBuffer(file);\n","    });\n","    // Wait for the data to be ready.\n","    let fileData = yield {\n","      promise: fileDataPromise,\n","      response: {\n","        action: 'continue',\n","      }\n","    };\n","\n","    // Use a chunked sending to avoid message size limits. See b/62115660.\n","    let position = 0;\n","    do {\n","      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);\n","      const chunk = new Uint8Array(fileData, position, length);\n","      position += length;\n","\n","      const base64 = btoa(String.fromCharCode.apply(null, chunk));\n","      yield {\n","        response: {\n","          action: 'append',\n","          file: file.name,\n","          data: base64,\n","        },\n","      };\n","\n","      let percentDone = fileData.byteLength === 0 ?\n","          100 :\n","          Math.round((position / fileData.byteLength) * 100);\n","      percent.textContent = `${percentDone}% done`;\n","\n","    } while (position < fileData.byteLength);\n","  }\n","\n","  // All done.\n","  yield {\n","    response: {\n","      action: 'complete',\n","    }\n","  };\n","}\n","\n","scope.google = scope.google || {};\n","scope.google.colab = scope.google.colab || {};\n","scope.google.colab._files = {\n","  _uploadFiles,\n","  _uploadFilesContinue,\n","};\n","})(self);\n","</script> "]},"metadata":{}},{"output_type":"stream","name":"stdout","text":["Saving U=8 Reduced dataset&imimportant features,randomforest,lasso-OP.zip to U=8 Reduced dataset&imimportant features,randomforest,lasso-OP (5).zip\n"," Using file: player_injuries_cleaned_final (2) (1) (1) (2) (3) (1) (1).xlsx\n","Train: (71370, 394) Validation: (23790, 394) Test: (23790, 394)\n","Final selected features: 4\n","Best Params: {'depth': 8, 'iterations': 500, 'learning_rate': 0.05, 'subsample': 0.7}\n","Validation Accuracy: 76.14 %\n","\n","FINAL TEST ACCURACY: 76.49 %\n","              precision    recall  f1-score   support\n","\n","  Short-term       0.63      0.28      0.39      2716\n"," Medium-term       0.63      0.78      0.70      8020\n","   Long-term       0.89      0.86      0.87     13054\n","\n","    accuracy                           0.76     23790\n","   macro avg       0.72      0.64      0.65     23790\n","weighted avg       0.77      0.76      0.76     23790\n","\n"," Train / Validation / Test datasets saved\n"]}]}]}
+# ==================================================
+# 0. INSTALL CATBOOST (SAFE)
+# ==================================================
+try:
+    from catboost import CatBoostClassifier
+except ModuleNotFoundError:
+    !pip install -q catboost
+    from catboost import CatBoostClassifier
+
+# ==================================================
+# 1. IMPORTS
+# ==================================================
+import pandas as pd
+import numpy as np
+import zipfile, os
+from google.colab import files
+
+from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LassoCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report
+
+import warnings
+warnings.filterwarnings("ignore")
+
+# ==================================================
+# 2. FILE UPLOAD
+# ==================================================
+print(" Upload ZIP or Excel file")
+uploaded = files.upload()
+
+file_name = list(uploaded.keys())[0]
+base_dir = "/content/data"
+os.makedirs(base_dir, exist_ok=True)
+
+file_path = os.path.join(base_dir, file_name)
+with open(file_path, "wb") as f:
+    f.write(uploaded[file_name])
+
+# ==================================================
+# 3. FAST ZIP EXTRACTION + FILE SCAN
+# ==================================================
+excel_files = []
+
+if file_name.endswith(".zip"):
+    with zipfile.ZipFile(file_path, "r") as z:
+        z.extractall(base_dir)
+
+    # FAST scan (1-level only)
+    for item in os.listdir(base_dir):
+        p = os.path.join(base_dir, item)
+        if item.lower().endswith((".xlsx", ".xls")):
+            excel_files.append(p)
+        elif os.path.isdir(p):
+            for f in os.listdir(p):
+                if f.lower().endswith((".xlsx", ".xls")):
+                    excel_files.append(os.path.join(p, f))
+else:
+    excel_files.append(file_path)
+
+if not excel_files:
+    raise ValueError(" No Excel files found")
+
+# Auto-pick injury dataset if possible
+injury_files = [f for f in excel_files if "injur" in f.lower()]
+selected_file = injury_files[0] if injury_files else excel_files[0]
+
+print(" Using file:", os.path.basename(selected_file))
+df = pd.read_excel(selected_file)
+
+# ==================================================
+# 4. TARGET CHECK
+# ==================================================
+if "days_missed" not in df.columns:
+    raise ValueError(" 'days_missed' column not found (select injury dataset)")
+
+# ==================================================
+# 5. TARGET CREATION
+# ==================================================
+def categorize_days(v):
+    if v <= 5:
+        return 0
+    elif v <= 15:
+        return 1
+    else:
+        return 2
+
+y = df["days_missed"].apply(categorize_days)
+X = df.drop(columns=["days_missed", "player_id"], errors="ignore")
+
+# ==================================================
+# 6. FEATURE ENGINEERING
+# ==================================================
+for c in X.columns:
+    if "date" in c.lower():
+        X[c] = pd.to_datetime(X[c], errors="coerce")
+        X[c] = (X[c] - X[c].min()).dt.days
+
+X = pd.get_dummies(X, drop_first=True)
+
+# ==================================================
+# 7. TRAIN / VALIDATION / TEST SPLIT
+# ==================================================
+X_temp, X_test, y_temp, y_test = train_test_split(
+    X, y, test_size=0.20, stratify=y, random_state=42
+)
+
+X_train, X_val, y_train, y_val = train_test_split(
+    X_temp, y_temp, test_size=0.25, stratify=y_temp, random_state=42
+)
+
+print("Train:", X_train.shape, "Validation:", X_val.shape, "Test:", X_test.shape)
+
+# ==================================================
+# 8. PREPROCESSING
+# ==================================================
+prep = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler())
+])
+
+X_train = pd.DataFrame(prep.fit_transform(X_train), columns=X.columns)
+X_val   = pd.DataFrame(prep.transform(X_val), columns=X.columns)
+X_test  = pd.DataFrame(prep.transform(X_test), columns=X.columns)
+
+# ==================================================
+# 9. FEATURE SELECTION (TRAIN ONLY)
+# ==================================================
+rf = RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1)
+rf.fit(X_train, y_train)
+
+rf_imp = pd.Series(rf.feature_importances_, index=X.columns)
+rf_features = rf_imp[rf_imp > 0.01].index.tolist()
+if not rf_features:
+    rf_features = rf_imp.sort_values(ascending=False).head(5).index.tolist()
+
+X_train = X_train[rf_features]
+X_val   = X_val[rf_features]
+X_test  = X_test[rf_features]
+
+lasso = LassoCV(cv=5, max_iter=5000)
+lasso.fit(X_train, y_train)
+
+lasso_features = X_train.columns[np.abs(lasso.coef_) > 0].tolist()
+if not lasso_features:
+    lasso_features = X_train.columns.tolist()
+
+X_train = X_train[lasso_features]
+X_val   = X_val[lasso_features]
+X_test  = X_test[lasso_features]
+
+print("Final selected features:", len(lasso_features))
+
+# ==================================================
+# 10. HYPERPARAMETER TUNING (GRID + CV)
+# ==================================================
+cat = CatBoostClassifier(
+    loss_function="MultiClass",
+    verbose=0,
+    bootstrap_type="Bernoulli"
+)
+
+param_grid = {
+    "depth": [6, 8],
+    "learning_rate": [0.03, 0.05],
+    "iterations": [300, 500],
+    "subsample": [0.7, 0.9]
+}
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+grid = GridSearchCV(
+    cat,
+    param_grid,
+    cv=cv,
+    scoring="accuracy",
+    n_jobs=-1
+)
+
+grid.fit(X_train, y_train)
+best_model = grid.best_estimator_
+
+print("Best Params:", grid.best_params_)
+
+# ==================================================
+# 11. VALIDATION PERFORMANCE
+# ==================================================
+val_preds = best_model.predict(X_val)
+print("Validation Accuracy:", round(accuracy_score(y_val, val_preds)*100, 2), "%")
+
+# ==================================================
+# 12. FINAL TEST (DEPLOYMENT DATA)
+# ==================================================
+test_preds = best_model.predict(X_test)
+print("\nFINAL TEST ACCURACY:", round(accuracy_score(y_test, test_preds)*100, 2), "%")
+print(classification_report(y_test, test_preds,
+      target_names=["Short-term", "Medium-term", "Long-term"]))
+
+# ==================================================
+# 13. SAVE DATASETS
+# ==================================================
+X_train.assign(target=y_train).to_csv("/content/train_dataset.csv", index=False)
+X_val.assign(target=y_val).to_csv("/content/validation_dataset.csv", index=False)
+X_test.assign(target=y_test).to_csv("/content/test_dataset.csv", index=False)
+
+print(" Train / Validation / Test datasets saved")
+ 
+
+
+ ##OUTPUT:
+
+Upload ZIP or Excel file
+No file chosen Upload widget is only available when the cell has been executed in the current browser session. Please rerun this cell to enable.
+Saving U=8 Reduced dataset&imimportant features,randomforest,lasso-OP.zip to U=8 Reduced dataset&imimportant features,randomforest,lasso-OP (5).zip
+ Using file: player_injuries_cleaned_final (2) (1) (1) (2) (3) (1) (1).xlsx
+Train: (71370, 394) Validation: (23790, 394) Test: (23790, 394)
+Final selected features: 4
+Best Params: {'depth': 8, 'iterations': 500, 'learning_rate': 0.05, 'subsample': 0.7}
+Validation Accuracy: 76.14 %
+
+FINAL TEST ACCURACY: 76.49 %
+              precision    recall  f1-score   support
+
+  Short-term       0.63      0.28      0.39      2716
+ Medium-term       0.63      0.78      0.70      8020
+   Long-term       0.89      0.86      0.87     13054
+
+    accuracy                           0.76     23790
+   macro avg       0.72      0.64      0.65     23790
+weighted avg       0.77      0.76      0.76     23790
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+     2ND code
+     # ==================================================
+# 0. INSTALL CATBOOST (SAFE)
+# ==================================================
+try:
+    from catboost import CatBoostClassifier
+except ModuleNotFoundError:
+    !pip install -q catboost
+    from catboost import CatBoostClassifier
+
+# ==================================================
+# 1. IMPORTS
+# ==================================================
+import pandas as pd
+import numpy as np
+import zipfile, os
+from google.colab import files
+
+from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LassoCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report
+
+import warnings
+warnings.filterwarnings("ignore")
+
+# ==================================================
+# 2. FILE UPLOAD
+# ==================================================
+print(" Upload ZIP or Excel file")
+uploaded = files.upload()
+
+file_name = list(uploaded.keys())[0]
+base_dir = "/content/data"
+os.makedirs(base_dir, exist_ok=True)
+
+file_path = os.path.join(base_dir, file_name)
+with open(file_path, "wb") as f:
+    f.write(uploaded[file_name])
+
+# ==================================================
+# 3. FAST ZIP EXTRACTION + FILE SCAN
+# ==================================================
+excel_files = []
+
+if file_name.endswith(".zip"):
+    with zipfile.ZipFile(file_path, "r") as z:
+        z.extractall(base_dir)
+
+    # FAST scan (1-level only)
+    for item in os.listdir(base_dir):
+        p = os.path.join(base_dir, item)
+        if item.lower().endswith((".xlsx", ".xls")):
+            excel_files.append(p)
+        elif os.path.isdir(p):
+            for f in os.listdir(p):
+                if f.lower().endswith((".xlsx", ".xls")):
+                    excel_files.append(os.path.join(p, f))
+else:
+    excel_files.append(file_path)
+
+if not excel_files:
+    raise ValueError(" No Excel files found")
+
+# Auto-pick injury dataset if possible
+injury_files = [f for f in excel_files if "injur" in f.lower()]
+selected_file = injury_files[0] if injury_files else excel_files[0]
+
+print(" Using file:", os.path.basename(selected_file))
+df = pd.read_excel(selected_file)
+
+# ==================================================
+# 4. TARGET CHECK
+# ==================================================
+if "days_missed" not in df.columns:
+    raise ValueError(" 'days_missed' column not found (select injury dataset)")
+
+# ==================================================
+# 5. TARGET CREATION
+# ==================================================
+def categorize_days(v):
+    if v <= 5:
+        return 0
+    elif v <= 15:
+        return 1
+    else:
+        return 2
+
+y = df["days_missed"].apply(categorize_days)
+X = df.drop(columns=["days_missed", "player_id"], errors="ignore")
+
+# ==================================================
+# 6. FEATURE ENGINEERING
+# ==================================================
+for c in X.columns:
+    if "date" in c.lower():
+        X[c] = pd.to_datetime(X[c], errors="coerce")
+        X[c] = (X[c] - X[c].min()).dt.days
+
+X = pd.get_dummies(X, drop_first=True)
+
+# ==================================================
+# 7. TRAIN / VALIDATION / TEST SPLIT
+# ==================================================
+X_temp, X_test, y_temp, y_test = train_test_split(
+    X, y, test_size=0.20, stratify=y, random_state=42
+)
+
+X_train, X_val, y_train, y_val = train_test_split(
+    X_temp, y_temp, test_size=0.25, stratify=y_temp, random_state=42
+)
+
+print("Train:", X_train.shape, "Validation:", X_val.shape, "Test:", X_test.shape)
+
+# ==================================================
+# 8. PREPROCESSING
+# ==================================================
+prep = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler())
+])
+
+X_train = pd.DataFrame(prep.fit_transform(X_train), columns=X.columns)
+X_val   = pd.DataFrame(prep.transform(X_val), columns=X.columns)
+X_test  = pd.DataFrame(prep.transform(X_test), columns=X.columns)
+
+# ==================================================
+# 9. FEATURE SELECTION (TRAIN ONLY)
+# ==================================================
+rf = RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1)
+rf.fit(X_train, y_train)
+
+rf_imp = pd.Series(rf.feature_importances_, index=X.columns)
+rf_features = rf_imp[rf_imp > 0.01].index.tolist()
+if not rf_features:
+    rf_features = rf_imp.sort_values(ascending=False).head(5).index.tolist()
+
+X_train = X_train[rf_features]
+X_val   = X_val[rf_features]
+X_test  = X_test[rf_features]
+
+lasso = LassoCV(cv=5, max_iter=5000)
+lasso.fit(X_train, y_train)
+
+lasso_features = X_train.columns[np.abs(lasso.coef_) > 0].tolist()
+if not lasso_features:
+    lasso_features = X_train.columns.tolist()
+
+X_train = X_train[lasso_features]
+X_val   = X_val[lasso_features]
+X_test  = X_test[lasso_features]
+
+print("Final selected features:", len(lasso_features))
+
+# ==================================================
+# 10. HYPERPARAMETER TUNING (GRID + CV)
+# ==================================================
+cat = CatBoostClassifier(
+    loss_function="MultiClass",
+    verbose=0,
+    bootstrap_type="Bernoulli"
+)
+
+param_grid = {
+    "depth": [6, 8],
+    "learning_rate": [0.03, 0.05],
+    "iterations": [300, 500],
+    "subsample": [0.7, 0.9]
+}
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+grid = GridSearchCV(
+    cat,
+    param_grid,
+    cv=cv,
+    scoring="accuracy",
+    n_jobs=-1
+)
+
+grid.fit(X_train, y_train)
+best_model = grid.best_estimator_
+
+print("Best Params:", grid.best_params_)
+
+# ==================================================
+# 11. VALIDATION PERFORMANCE
+# ==================================================
+val_preds = best_model.predict(X_val)
+print("Validation Accuracy:", round(accuracy_score(y_val, val_preds)*100, 2), "%")
+
+# ==================================================
+# 12. FINAL TEST (DEPLOYMENT DATA)
+# ==================================================
+test_preds = best_model.predict(X_test)
+print("\nFINAL TEST ACCURACY:", round(accuracy_score(y_test, test_preds)*100, 2), "%")
+print(classification_report(y_test, test_preds,
+      target_names=["Short-term", "Medium-term", "Long-term"]))
+
+# ==================================================
+# 13. SAVE DATASETS
+# ==================================================
+X_train.assign(target=y_train).to_csv("/content/train_dataset.csv", index=False)
+X_val.assign(target=y_val).to_csv("/content/validation_dataset.csv", index=False)
+X_test.assign(target=y_test).to_csv("/content/test_dataset.csv", index=False)
+
+print(" Train / Validation / Test datasets saved")
